@@ -25,13 +25,13 @@ func init() {
 func main() {
 	flag.Parse()
 
-	// 1. Open UDP socket - Use 0.0.0.0 to force IPv4 and avoid Linux dual-stack issues
-	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("0.0.0.0:%d", port))
+	// 1. Open UDP socket - Use "udp4" and "0.0.0.0" to strictly force IPv4
+	addr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf("0.0.0.0:%d", port))
 	if err != nil {
 		log.Fatalf("Failed to resolve local address: %v", err)
 	}
 
-	conn, err := net.ListenUDP("udp", addr)
+	conn, err := net.ListenUDP("udp4", addr)
 	if err != nil {
 		log.Fatalf("Failed to listen on UDP: %v", err)
 	}
@@ -176,36 +176,41 @@ func getPublicAddr(conn *net.UDPConn) (net.Addr, error) {
 
 	var lastErr error
 	for _, stunServer := range stunServers {
+		fmt.Printf("Trying STUN server: %s...\n", stunServer)
 		message := stun.MustBuild(stun.TransactionID, stun.BindingRequest)
-		raddr, err := net.ResolveUDPAddr("udp", stunServer)
+		raddr, err := net.ResolveUDPAddr("udp4", stunServer)
 		if err != nil {
+			fmt.Printf("  [!] Resolution failed: %v\n", err)
 			lastErr = err
 			continue
 		}
 
 		_, err = conn.WriteToUDP(message.Raw, raddr)
 		if err != nil {
+			fmt.Printf("  [!] Write failed: %v\n", err)
 			lastErr = err
 			continue
 		}
 
 		buf := make([]byte, 1024)
-		// Increase timeout to 8 seconds for Linux/Mobile networks
-		conn.SetReadDeadline(time.Now().Add(8 * time.Second))
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		n, _, err := conn.ReadFrom(buf)
 		if err != nil {
+			fmt.Printf("  [!] Read failed: %v\n", err)
 			lastErr = err
 			continue
 		}
 
 		res := &stun.Message{Raw: buf[:n]}
 		if err := res.Decode(); err != nil {
+			fmt.Printf("  [!] Decode failed: %v\n", err)
 			lastErr = err
 			continue
 		}
 
 		var xorAddr stun.XORMappedAddress
 		if err := xorAddr.GetFrom(res); err != nil {
+			fmt.Printf("  [!] GetXORAddress failed: %v\n", err)
 			lastErr = err
 			continue
 		}
