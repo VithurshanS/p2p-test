@@ -25,7 +25,7 @@ func init() {
 func main() {
 	flag.Parse()
 
-	// 1. Open UDP socket
+	// 1. Open UDP socket - Use 0.0.0.0 to force IPv4 and avoid Linux dual-stack issues
 	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("0.0.0.0:%d", port))
 	if err != nil {
 		log.Fatalf("Failed to resolve local address: %v", err)
@@ -166,44 +166,62 @@ func main() {
 }
 
 func getPublicAddr(conn *net.UDPConn) (net.Addr, error) {
-	stunServer := "stun.l.google.com:19302"
-	message := stun.MustBuild(stun.TransactionID, stun.BindingRequest)
-	raddr, err := net.ResolveUDPAddr("udp", stunServer)
-	if err != nil {
-		return nil, err
+	// List of STUN servers to try
+	stunServers := []string{
+		"stun.l.google.com:19302",
+		"stun1.l.google.com:19302",
+		"stun2.l.google.com:19302",
+		"stun.pion.ly:3478",
 	}
 
-	_, err = conn.WriteToUDP(message.Raw, raddr)
-	if err != nil {
-		return nil, err
+	var lastErr error
+	for _, stunServer := range stunServers {
+		message := stun.MustBuild(stun.TransactionID, stun.BindingRequest)
+		raddr, err := net.ResolveUDPAddr("udp", stunServer)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		_, err = conn.WriteToUDP(message.Raw, raddr)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		buf := make([]byte, 1024)
+		// Increase timeout to 8 seconds for Linux/Mobile networks
+		conn.SetReadDeadline(time.Now().Add(8 * time.Second))
+		n, _, err := conn.ReadFrom(buf)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		res := &stun.Message{Raw: buf[:n]}
+		if err := res.Decode(); err != nil {
+			lastErr = err
+			continue
+		}
+
+		var xorAddr stun.XORMappedAddress
+		if err := xorAddr.GetFrom(res); err != nil {
+			lastErr = err
+			continue
+		}
+
+		localPort := conn.LocalAddr().(*net.UDPAddr).Port
+		if xorAddr.Port == localPort {
+			fmt.Println("NAT Type: No NAT or Full Cone NAT")
+		} else {
+			fmt.Println("NAT Type: NAT detected")
+		}
+
+		return &net.UDPAddr{
+			IP:   xorAddr.IP,
+			Port: xorAddr.Port,
+		}, nil
 	}
 
-	buf := make([]byte, 1024)
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	n, _, err := conn.ReadFrom(buf)
-	if err != nil {
-		return nil, err
-	}
-
-	res := &stun.Message{Raw: buf[:n]}
-	if err := res.Decode(); err != nil {
-		return nil, err
-	}
-
-	var xorAddr stun.XORMappedAddress
-	if err := xorAddr.GetFrom(res); err != nil {
-		return nil, err
-	}
-
-	localPort := conn.LocalAddr().(*net.UDPAddr).Port
-	if xorAddr.Port == localPort {
-		fmt.Println("NAT Type: No NAT or Full Cone NAT")
-	} else {
-		fmt.Println("NAT Type: NAT detected")
-	}
-
-	return &net.UDPAddr{
-		IP:   xorAddr.IP,
-		Port: xorAddr.Port,
-	}, nil
+	return nil, fmt.Errorf("all STUN servers failed. Last error: %v", lastErr)
 }
